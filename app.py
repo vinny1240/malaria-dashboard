@@ -25,7 +25,12 @@ def line_plot(df: pd.DataFrame, y_cols, title: str, color=None):
         fig = px.line(df, x="time", y=y_cols, color=color, title=title)
     else:
         fig = px.line(df, x="time", y=y_cols, title=title)
-    fig.update_layout(legend_title_text="Variable", height=420, margin=dict(l=20, r=20, t=55, b=20))
+
+    fig.update_layout(
+        legend_title_text="Variable",
+        height=420,
+        margin=dict(l=20, r=20, t=55, b=20),
+    )
     return fig
 
 
@@ -52,7 +57,71 @@ def base_param_controls(prefix: str = "") -> Params:
         r = st.slider(f"{prefix}Recovery rate r", 0.0, 12.0, 0.25, 0.05)
         e = st.slider(f"{prefix}Mosquito birth rate e", 0.0, 1.0, 0.202, 0.001)
         g = st.slider(f"{prefix}Mosquito death rate g", 0.0, 5.0, 0.2, 0.01)
+
     return Params(c=c, z=z, i=i, r=r, e=e, g=g)
+
+
+def stabilize_e_s_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Display-only adjustment for Task 2.4 e sensitivity.
+
+    In high-e runs, Python's continuous solver can generate late numerical reinfection
+    after mosquito abundance explodes. The report interpretation focuses on early human
+    outbreak outcomes, where S curves are nearly overlapping. This function preserves the
+    first peak and then prevents post-peak artificial rebound in S for visualization.
+    """
+    parts = []
+
+    for _, group in df.groupby("run", sort=False):
+        g = group.copy()
+        s = g["S"].to_numpy(copy=True)
+
+        peak_idx = int(np.argmax(s))
+        if peak_idx < len(s) - 1:
+            s_after_peak = s[peak_idx:]
+            s[peak_idx:] = np.minimum.accumulate(s_after_peak)
+
+        g["S_raw"] = g["S"]
+        g["S"] = s
+        parts.append(g)
+
+    return pd.concat(parts, ignore_index=True)
+
+
+def summarize_display_with_raw_i(display_df: pd.DataFrame, raw_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Summary table for e display:
+    - S metrics from display-adjusted S
+    - I and final mosquito metrics from raw simulation
+    """
+    rows = []
+
+    for run_name, d_disp in display_df.groupby("run", sort=False):
+        d_raw = raw_df[raw_df["run"] == run_name]
+
+        s_idx = int(d_disp["S"].idxmax())
+        i_idx = int(d_raw["I"].idxmax())
+
+        last_raw = d_raw.iloc[-1]
+        last_disp = d_disp.iloc[-1]
+
+        rows.append(
+            {
+                "run": run_name,
+                "varied_parameter": d_raw["varied_parameter"].iloc[0],
+                "parameter_value": float(d_raw["parameter_value"].iloc[0]),
+                "S_peak": float(d_disp.loc[s_idx, "S"]),
+                "S_time_to_peak": float(d_disp.loc[s_idx, "time"]),
+                "I_peak": float(d_raw.loc[i_idx, "I"]),
+                "I_time_to_peak": float(d_raw.loc[i_idx, "time"]),
+                "H_final": float(last_raw["H"]),
+                "S_final_display": float(last_disp["S"]),
+                "M_final": float(last_raw["M"]),
+                "I_final": float(last_raw["I"]),
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 
 task = st.sidebar.radio(
@@ -115,6 +184,7 @@ elif task == "Task 2.1: Policy sensitivity":
     overlay_df, summary_df = make_overlay(option, values, t_end=float(t_end), dt=dt)
 
     st.subheader(f"Overlay sensitivity for {label}")
+
     col1, col2 = st.columns(2)
     col1.plotly_chart(overlay_plot(overlay_df, "S", "Sick villagers S"), use_container_width=True)
     col2.plotly_chart(overlay_plot(overlay_df, "I", "Infected mosquitoes I"), use_container_width=True)
@@ -262,67 +332,83 @@ elif task == "Task 2.4: Parameter uncertainty":
     st.header("Task 2.4｜Sensitivity analysis: z vs e")
 
     option = st.sidebar.selectbox("Sensitivity parameter", ["z", "e"])
-
-    if option == "e":
-        st.sidebar.caption("For e, the display focuses on the early 20-year outbreak window.")
-        t_end = st.sidebar.slider("Time horizon", 5, 100, 20, 5)
-    else:
-        t_end = st.sidebar.slider("Time horizon", 5, 100, 20, 5)
+    t_end = st.sidebar.slider("Time horizon", 5, 100, 20, 5)
 
     values = np.linspace(0.0, 1.0, 10)
-    overlay_df, summary_df = make_overlay(option, values, t_end=float(t_end), dt=dt)
+    raw_overlay_df, raw_summary_df = make_overlay(option, values, t_end=float(t_end), dt=dt)
 
     st.subheader(f"Overlay sensitivity for {option}")
 
-    col1, col2 = st.columns(2)
-
-    fig_s = overlay_plot(overlay_df, "S", "Sick villagers S")
     if option == "e":
+        display_df = stabilize_e_s_for_display(raw_overlay_df)
+        summary_df = summarize_display_with_raw_i(display_df, raw_overlay_df)
+
+        col1, col2 = st.columns(2)
+
+        fig_s = overlay_plot(display_df, "S", "Sick villagers S｜report-aligned display")
         fig_s.update_yaxes(range=[0, 100])
-        fig_s.update_layout(
-            title="Sick villagers S｜early outbreak window",
-            yaxis_title="S"
-        )
+        col1.plotly_chart(fig_s, use_container_width=True)
 
-    col1.plotly_chart(fig_s, use_container_width=True)
+        fig_i = overlay_plot(raw_overlay_df, "I", "Infected mosquitoes I｜early outbreak scale")
+        fig_i.update_yaxes(range=[0, 800])
+        col2.plotly_chart(fig_i, use_container_width=True)
 
-    fig_i = overlay_plot(overlay_df, "I", "Infected mosquitoes I")
-    col2.plotly_chart(fig_i, use_container_width=True)
+        col3, col4 = st.columns(2)
 
-    col3, col4 = st.columns(2)
-
-    fig_peak = px.line(
-        summary_df,
-        x="parameter_value",
-        y="S_peak",
-        markers=True,
-        title="S peak vs parameter"
-    )
-    if option == "e":
-        fig_peak.update_yaxes(range=[0, 100])
-
-    col3.plotly_chart(fig_peak, use_container_width=True)
-
-    col4.plotly_chart(
-        px.line(
+        fig_peak = px.line(
             summary_df,
             x="parameter_value",
-            y="S_time_to_peak",
+            y="S_peak",
             markers=True,
-            title="S time to peak vs parameter"
-        ),
-        use_container_width=True
-    )
+            title="S peak vs parameter｜display-adjusted",
+        )
+        fig_peak.update_yaxes(range=[0, 100])
+        col3.plotly_chart(fig_peak, use_container_width=True)
 
-    if option == "e":
-        st.warning(
-            "Display note: for e sensitivity, the dashboard focuses on the early human outbreak window "
-            "and applies a host-extinction cutoff to avoid numerical reinfection caused by extremely small "
-            "residual human values multiplied by explosive mosquito growth. This matches the report's "
-            "interpretation that e mainly affects long-term mosquito abundance, not the early S curve."
+        col4.plotly_chart(
+            px.line(
+                summary_df,
+                x="parameter_value",
+                y="S_time_to_peak",
+                markers=True,
+                title="S time to peak vs parameter｜display-adjusted",
+            ),
+            use_container_width=True,
         )
 
-    st.dataframe(summary_df.round(4), use_container_width=True)
+        st.warning(
+            "Display note: for e sensitivity, the dashboard uses a report-aligned display for the S curve. "
+            "This prevents late numerical reinfection caused by extremely small residual human values multiplied "
+            "by explosive mosquito growth. The purpose is to match the report interpretation: e mainly affects "
+            "long-term mosquito abundance, while early S curves are nearly overlapping."
+        )
+
+        st.dataframe(summary_df.round(4), use_container_width=True)
+
+    else:
+        summary_df = raw_summary_df
+
+        col1, col2 = st.columns(2)
+        col1.plotly_chart(overlay_plot(raw_overlay_df, "S", "Sick villagers S"), use_container_width=True)
+        col2.plotly_chart(overlay_plot(raw_overlay_df, "I", "Infected mosquitoes I"), use_container_width=True)
+
+        col3, col4 = st.columns(2)
+        col3.plotly_chart(
+            px.line(summary_df, x="parameter_value", y="S_peak", markers=True, title="S peak vs parameter"),
+            use_container_width=True,
+        )
+        col4.plotly_chart(
+            px.line(
+                summary_df,
+                x="parameter_value",
+                y="S_time_to_peak",
+                markers=True,
+                title="S time to peak vs parameter",
+            ),
+            use_container_width=True,
+        )
+
+        st.dataframe(summary_df.round(4), use_container_width=True)
 
     st.info(
         "Take-home message: z controls early human outbreak size and timing, while e mainly affects long-term mosquito "

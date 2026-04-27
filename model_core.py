@@ -23,8 +23,10 @@ class Params:
 
 
 def _safe_nonnegative(y: np.ndarray) -> np.ndarray:
-    """Avoid tiny negative values from numerical integration."""
-    return np.maximum(y, 0.0)
+    """Avoid numerical artifacts from tiny negative or near-zero values."""
+    y = np.maximum(y, 0.0)
+    y[y < 1e-10] = 0.0
+    return y
 
 
 def derivatives(
@@ -55,7 +57,6 @@ def derivatives(
     pesticide_effect = pesticide_p0 * np.exp(-pesticide_k * t)
     g_new = p.g + pesticide_effect
 
-    # Human population flows
     infection_h_to_s = c * z * H * I
     recovery_s_to_h = p.r * S
     human_births = p.b * N
@@ -63,7 +64,6 @@ def derivatives(
     human_natural_deaths_s = p.u * S
     malaria_deaths = p.i * S
 
-    # Mosquito population flows
     mosquito_births = p.e * m
     mosquito_infection = (S / (N + 1.0)) * c * M
     mosquito_deaths_m = g_new * M
@@ -90,10 +90,11 @@ def simulate(
     z_max: float = 0.99,
     z_quad: float = 0.01,
 ) -> pd.DataFrame:
-    """Run RK4 simulation and return a tidy time-series DataFrame."""
+    """Run RK4 simulation and return a time-series DataFrame."""
     p = params or Params()
     n_steps = int(round(t_end / dt))
     times = np.linspace(0.0, n_steps * dt, n_steps + 1)
+
     y = np.array([p.H0, p.S0, p.M0, p.I0], dtype=float)
     out = np.zeros((n_steps + 1, 4), dtype=float)
     out[0] = y
@@ -116,12 +117,10 @@ def simulate(
         df["Current_Temp"] = current_temp
         df["c_T"] = max(0.0, c_max - c_quad * (current_temp - 26.0) ** 2)
         df["z_T"] = max(0.0, z_max - z_quad * (current_temp - 25.0) ** 2)
-    if pesticide_p0 != 0:
-        df["Pesticide_Effect"] = pesticide_p0 * np.exp(-pesticide_k * df["time"])
-        df["g_new"] = p.g + df["Pesticide_Effect"]
-    else:
-        df["Pesticide_Effect"] = 0.0
-        df["g_new"] = p.g
+
+    df["Pesticide_Effect"] = pesticide_p0 * np.exp(-pesticide_k * df["time"]) if pesticide_p0 != 0 else 0.0
+    df["g_new"] = p.g + df["Pesticide_Effect"]
+
     return df
 
 
@@ -153,20 +152,24 @@ def make_overlay(
     p0 = base_params or Params()
     rows: List[pd.DataFrame] = []
     summary_rows = []
+
     for run_idx, val in enumerate(values, start=1):
         params_dict = p0.__dict__.copy()
         params_dict[variable] = float(val)
         p = Params(**params_dict)
+
         df = simulate(params=p, t_end=t_end, **kwargs)
         df["run"] = f"Run {run_idx}"
         df["varied_parameter"] = variable
         df["parameter_value"] = float(val)
         rows.append(df)
+
         summary = summarize(df)
         summary["run"] = f"Run {run_idx}"
         summary["varied_parameter"] = variable
         summary["parameter_value"] = float(val)
         summary_rows.append(summary)
+
     return pd.concat(rows, ignore_index=True), pd.DataFrame(summary_rows)
 
 
@@ -178,13 +181,16 @@ def temperature_overlay(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     rows = []
     summary_rows = []
+
     for run_idx, w in enumerate(warming_values, start=1):
         df = simulate(params=base_params or Params(), t_end=t_end, warming_dc=float(w), **kwargs)
         df["run"] = f"Run {run_idx}"
         df["Warming_dC"] = float(w)
         rows.append(df)
+
         summary = summarize(df)
         summary["run"] = f"Run {run_idx}"
         summary["Warming_dC"] = float(w)
         summary_rows.append(summary)
+
     return pd.concat(rows, ignore_index=True), pd.DataFrame(summary_rows)

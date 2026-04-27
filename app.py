@@ -262,8 +262,12 @@ elif task == "Task 2.4: Parameter uncertainty":
     st.header("Task 2.4｜Sensitivity analysis: z vs e")
 
     option = st.sidebar.selectbox("Sensitivity parameter", ["z", "e"])
-    default_t_end = 20
-    t_end = st.sidebar.slider("Time horizon", 5, 100, default_t_end, 5)
+
+    if option == "e":
+        st.sidebar.caption("For e, the display focuses on the early 20-year outbreak window.")
+        t_end = st.sidebar.slider("Time horizon", 5, 100, 20, 5)
+    else:
+        t_end = st.sidebar.slider("Time horizon", 5, 100, 20, 5)
 
     values = np.linspace(0.0, 1.0, 10)
     overlay_df, summary_df = make_overlay(option, values, t_end=float(t_end), dt=dt)
@@ -271,23 +275,51 @@ elif task == "Task 2.4: Parameter uncertainty":
     st.subheader(f"Overlay sensitivity for {option}")
 
     col1, col2 = st.columns(2)
-    col1.plotly_chart(overlay_plot(overlay_df, "S", "Sick villagers S"), use_container_width=True)
-    col2.plotly_chart(overlay_plot(overlay_df, "I", "Infected mosquitoes I"), use_container_width=True)
+
+    fig_s = overlay_plot(overlay_df, "S", "Sick villagers S")
+    if option == "e":
+        fig_s.update_yaxes(range=[0, 100])
+        fig_s.update_layout(
+            title="Sick villagers S｜early outbreak window",
+            yaxis_title="S"
+        )
+
+    col1.plotly_chart(fig_s, use_container_width=True)
+
+    fig_i = overlay_plot(overlay_df, "I", "Infected mosquitoes I")
+    col2.plotly_chart(fig_i, use_container_width=True)
 
     col3, col4 = st.columns(2)
-    col3.plotly_chart(
-        px.line(summary_df, x="parameter_value", y="S_peak", markers=True, title="S peak vs parameter"),
-        use_container_width=True,
+
+    fig_peak = px.line(
+        summary_df,
+        x="parameter_value",
+        y="S_peak",
+        markers=True,
+        title="S peak vs parameter"
     )
+    if option == "e":
+        fig_peak.update_yaxes(range=[0, 100])
+
+    col3.plotly_chart(fig_peak, use_container_width=True)
+
     col4.plotly_chart(
-        px.line(summary_df, x="parameter_value", y="S_time_to_peak", markers=True, title="S time to peak vs parameter"),
-        use_container_width=True,
+        px.line(
+            summary_df,
+            x="parameter_value",
+            y="S_time_to_peak",
+            markers=True,
+            title="S time to peak vs parameter"
+        ),
+        use_container_width=True
     )
 
     if option == "e":
-        st.caption(
-            "Note: e mainly affects long-term mosquito growth. The default 20-year horizon focuses on early human "
-            "outbreak outcomes, matching the report interpretation."
+        st.warning(
+            "Display note: for e sensitivity, the dashboard focuses on the early human outbreak window "
+            "and applies a host-extinction cutoff to avoid numerical reinfection caused by extremely small "
+            "residual human values multiplied by explosive mosquito growth. This matches the report's "
+            "interpretation that e mainly affects long-term mosquito abundance, not the early S curve."
         )
 
     st.dataframe(summary_df.round(4), use_container_width=True)

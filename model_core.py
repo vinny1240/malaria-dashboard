@@ -23,10 +23,8 @@ class Params:
 
 
 def _safe_nonnegative(y: np.ndarray) -> np.ndarray:
-    """Avoid numerical artifacts from tiny negative or near-zero values."""
-    y = np.maximum(y, 0.0)
-    y[y < 1e-10] = 0.0
-    return y
+    """Avoid tiny negative values from numerical integration."""
+    return np.maximum(y, 0.0)
 
 
 def derivatives(
@@ -57,6 +55,7 @@ def derivatives(
     pesticide_effect = pesticide_p0 * np.exp(-pesticide_k * t)
     g_new = p.g + pesticide_effect
 
+    # Human population flows
     infection_h_to_s = c * z * H * I
     recovery_s_to_h = p.r * S
     human_births = p.b * N
@@ -64,6 +63,7 @@ def derivatives(
     human_natural_deaths_s = p.u * S
     malaria_deaths = p.i * S
 
+    # Mosquito population flows
     mosquito_births = p.e * m
     mosquito_infection = (S / (N + 1.0)) * c * M
     mosquito_deaths_m = g_new * M
@@ -99,17 +99,8 @@ def simulate(
     out = np.zeros((n_steps + 1, 4), dtype=float)
     out[0] = y
 
-    human_extinction_threshold = 1e-6
-
     for idx in range(n_steps):
         t = times[idx]
-
-        # If the human host population is numerically exhausted,
-        # treat it as extinct to avoid artificial reinfection from tiny residual values.
-        if y[0] + y[1] < human_extinction_threshold:
-            y[0] = 0.0
-            y[1] = 0.0
-
         k1 = derivatives(t, y, p, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
         k2 = derivatives(t + dt / 2, y + dt * k1 / 2, p, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
         k3 = derivatives(t + dt / 2, y + dt * k2 / 2, p, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
@@ -117,11 +108,6 @@ def simulate(
 
         y = y + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
         y = _safe_nonnegative(y)
-
-        if y[0] + y[1] < human_extinction_threshold:
-            y[0] = 0.0
-            y[1] = 0.0
-
         out[idx + 1] = y
 
     df = pd.DataFrame(out, columns=["H", "S", "M", "I"])
@@ -133,8 +119,12 @@ def simulate(
         df["c_T"] = max(0.0, c_max - c_quad * (current_temp - 26.0) ** 2)
         df["z_T"] = max(0.0, z_max - z_quad * (current_temp - 25.0) ** 2)
 
-    df["Pesticide_Effect"] = pesticide_p0 * np.exp(-pesticide_k * df["time"]) if pesticide_p0 != 0 else 0.0
-    df["g_new"] = p.g + df["Pesticide_Effect"]
+    if pesticide_p0 != 0:
+        df["Pesticide_Effect"] = pesticide_p0 * np.exp(-pesticide_k * df["time"])
+        df["g_new"] = p.g + df["Pesticide_Effect"]
+    else:
+        df["Pesticide_Effect"] = 0.0
+        df["g_new"] = p.g
 
     return df
 
@@ -144,6 +134,7 @@ def summarize(df: pd.DataFrame) -> Dict[str, float]:
     s_idx = int(df["S"].idxmax())
     i_idx = int(df["I"].idxmax())
     last = df.iloc[-1]
+
     return {
         "S_peak": float(df.loc[s_idx, "S"]),
         "S_time_to_peak": float(df.loc[s_idx, "time"]),

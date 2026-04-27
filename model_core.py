@@ -22,19 +22,11 @@ class Params:
     z: float = 0.9
 
 
-def _safe_nonnegative(y: np.ndarray) -> np.ndarray:
-    """
-    Avoid tiny negative values from numerical integration and prevent
-    'zombie' populations (floating-point artifacts) from causing reinfection.
-    Any population smaller than 1e-9 is considered physically extinct (0.0).
-    """
-    return np.where(y < 1e-9, 0.0, y)
-
-
 def derivatives(
     t: float,
     y: np.ndarray,
     p: Params,
+    dt: float,  # 新增 dt 參數以計算流量極限
     pesticide_p0: float = 0.0,
     pesticide_k: float = 1.4,
     warming_dc: float | None = None,
@@ -44,11 +36,11 @@ def derivatives(
     z_max: float = 0.99,
     z_quad: float = 0.01,
 ) -> np.ndarray:
-    """Core malaria ODEs matching the STELLA model logic."""
-    H, S, M, I = _safe_nonnegative(y)
+    """Core malaria ODEs implementing STELLA's strict non-negative flow restrictions."""
+    H, S, M, I = np.maximum(y, 0.0) # 防止計算產生的微小負數
     N = H + S
-    if N == 0:  # Prevent division by zero mathematically
-        N = 1e-9
+    if N < 1e-12: 
+        N = 1e-12
     m = M + I
 
     c = p.c
@@ -61,24 +53,49 @@ def derivatives(
     pesticide_effect = pesticide_p0 * np.exp(-pesticide_k * t)
     g_new = p.g + pesticide_effect
 
-    # Human population flows
-    infection_h_to_s = c * z * H * I
-    recovery_s_to_h = p.r * S
-    human_births = p.b * N
-    human_natural_deaths_h = p.u * H
-    human_natural_deaths_s = p.u * S
-    malaria_deaths = p.i * S
+    # 1. 初始計算所有「需求流量 (Requested Flows)」
+    f_H_out_inf = c * z * H * I
+    f_H_out_death = p.u * H
+    
+    f_S_out_rec = p.r * S
+    f_S_out_death = (p.i + p.u) * S
+    
+    f_M_out_inf = (S / (N + 1.0)) * c * M
+    f_M_out_death = g_new * M
+    
+    f_I_out_death = g_new * I
 
-    # Mosquito population flows
-    mosquito_births = p.e * m
-    mosquito_infection = (S / (N + 1.0)) * c * M
-    mosquito_deaths_m = g_new * M
-    mosquito_deaths_i = g_new * I
+    # 2. 實作 STELLA 流量限制 (Flow Restriction)：確保流出量不會超過當下存量
+    # H 的流量限制
+    tot_H_out = f_H_out_inf + f_H_out_death
+    if tot_H_out > H / dt and tot_H_out > 0:
+        scale = (H / dt) / tot_H_out
+        f_H_out_inf *= scale
+        f_H_out_death *= scale
+        
+    # S 的流量限制
+    tot_S_out = f_S_out_rec + f_S_out_death
+    if tot_S_out > S / dt and tot_S_out > 0:
+        scale = (S / dt) / tot_S_out
+        f_S_out_rec *= scale
+        f_S_out_death *= scale
+        
+    # M 的流量限制
+    tot_M_out = f_M_out_inf + f_M_out_death
+    if tot_M_out > M / dt and tot_M_out > 0:
+        scale = (M / dt) / tot_M_out
+        f_M_out_inf *= scale
+        f_M_out_death *= scale
+        
+    # I 的流量限制
+    if f_I_out_death > I / dt:
+        f_I_out_death = I / dt
 
-    dH = human_births + recovery_s_to_h - infection_h_to_s - human_natural_deaths_h
-    dS = infection_h_to_s - recovery_s_to_h - malaria_deaths - human_natural_deaths_s
-    dM = mosquito_births - mosquito_deaths_m - mosquito_infection
-    dI = mosquito_infection - mosquito_deaths_i
+    # 3. 計算最終的淨變化率 (流入 - 流出)
+    dH = p.b * N + f_S_out_rec - f_H_out_inf - f_H_out_death
+    dS = f_H_out_inf - f_S_out_rec - f_S_out_death
+    dM = p.e * m - f_M_out_inf - f_M_out_death
+    dI = f_M_out_inf - f_I_out_death
 
     return np.array([dH, dS, dM, dI], dtype=float)
 
@@ -96,7 +113,6 @@ def simulate(
     z_max: float = 0.99,
     z_quad: float = 0.01,
 ) -> pd.DataFrame:
-    """Run RK4 simulation and return a time-series DataFrame."""
     p = params or Params()
     n_steps = int(round(t_end / dt))
     times = np.linspace(0.0, n_steps * dt, n_steps + 1)
@@ -107,13 +123,14 @@ def simulate(
 
     for idx in range(n_steps):
         t = times[idx]
-        k1 = derivatives(t, y, p, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
-        k2 = derivatives(t + dt / 2, y + dt * k1 / 2, p, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
-        k3 = derivatives(t + dt / 2, y + dt * k2 / 2, p, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
-        k4 = derivatives(t + dt, y + dt * k3, p, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
+        # 傳遞 dt 進入 RK4 以進行流量限制
+        k1 = derivatives(t, y, p, dt, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
+        k2 = derivatives(t + dt / 2, y + dt * k1 / 2, p, dt, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
+        k3 = derivatives(t + dt / 2, y + dt * k2 / 2, p, dt, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
+        k4 = derivatives(t + dt, y + dt * k3, p, dt, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
 
         y = y + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-        y = _safe_nonnegative(y)
+        y = np.maximum(y, 0.0) # 最後的保險
         out[idx + 1] = y
 
     df = pd.DataFrame(out, columns=["H", "S", "M", "I"])
@@ -136,7 +153,6 @@ def simulate(
 
 
 def summarize(df: pd.DataFrame) -> Dict[str, float]:
-    """Return common peak and final-state metrics."""
     s_idx = int(df["S"].idxmax())
     i_idx = int(df["I"].idxmax())
     last = df.iloc[-1]
@@ -160,7 +176,6 @@ def make_overlay(
     t_end: float = 20.0,
     **kwargs,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Run multiple simulations varying one Params field."""
     p0 = base_params or Params()
     rows: List[pd.DataFrame] = []
     summary_rows = []

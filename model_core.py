@@ -23,8 +23,12 @@ class Params:
 
 
 def _safe_nonnegative(y: np.ndarray) -> np.ndarray:
-    """Avoid tiny negative values from numerical integration."""
-    return np.maximum(y, 0.0)
+    """
+    Avoid tiny negative values from numerical integration and prevent
+    'zombie' populations (floating-point artifacts) from causing reinfection.
+    Any population smaller than 1e-9 is considered physically extinct (0.0).
+    """
+    return np.where(y < 1e-9, 0.0, y)
 
 
 def derivatives(
@@ -43,6 +47,8 @@ def derivatives(
     """Core malaria ODEs matching the STELLA model logic."""
     H, S, M, I = _safe_nonnegative(y)
     N = H + S
+    if N == 0:  # Prevent division by zero mathematically
+        N = 1e-9
     m = M + I
 
     c = p.c

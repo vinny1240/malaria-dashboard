@@ -99,14 +99,29 @@ def simulate(
     out = np.zeros((n_steps + 1, 4), dtype=float)
     out[0] = y
 
+    human_extinction_threshold = 1e-6
+
     for idx in range(n_steps):
         t = times[idx]
+
+        # If the human host population is numerically exhausted,
+        # treat it as extinct to avoid artificial reinfection from tiny residual values.
+        if y[0] + y[1] < human_extinction_threshold:
+            y[0] = 0.0
+            y[1] = 0.0
+
         k1 = derivatives(t, y, p, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
         k2 = derivatives(t + dt / 2, y + dt * k1 / 2, p, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
         k3 = derivatives(t + dt / 2, y + dt * k2 / 2, p, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
         k4 = derivatives(t + dt, y + dt * k3, p, pesticide_p0, pesticide_k, warming_dc, base_temp, c_max, c_quad, z_max, z_quad)
+
         y = y + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
         y = _safe_nonnegative(y)
+
+        if y[0] + y[1] < human_extinction_threshold:
+            y[0] = 0.0
+            y[1] = 0.0
+
         out[idx + 1] = y
 
     df = pd.DataFrame(out, columns=["H", "S", "M", "I"])
